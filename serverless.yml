@@ -1,0 +1,118 @@
+service: radio-reporter
+
+frameworkVersion: '2'
+useDotenv: true
+variablesResolutionMode: 20210326
+
+provider:
+  name: aws
+  runtime: python3.8
+  lambdaHashingVersion: 20201221
+
+  region: eu-west-2
+  iamRoleStatements:
+    - Effect: Allow
+      Action:
+        - lambda:InvokeFunction
+        - lambda:InvokeAsync
+      Resource: '*'
+    - Effect: Allow
+      Action:
+        - s3:GetObject
+        - s3:PutObject
+      Resource: '*'
+    - Effect: Allow
+      Action:
+        - dynamodb:*
+      Resource: !GetAtt ReporterTable.Arn
+  environment:
+    DYNAMO_TABLE_NAME: ${self:service}-table
+    BUCKET_NAME: ${self:service}-sample-bucket
+    STREAM_URLS: ${env:STREAM_URLS}
+    SPOTIPY_CLIENT_ID: ${env:SPOTIPY_CLIENT_ID}
+    SPOTIPY_CLIENT_SECRET: ${env:SPOTIPY_CLIENT_SECRET}
+    FFMPEG_ARN: ${env:FFMPEG_ARN}
+    SAMPLE_LAMBDA_NAME: ${self:service}-${opt:stage, 'dev'}-sample
+
+package:
+  individually: true
+  patterns:
+    - '!./**'
+
+layers:
+  Recognise:
+    package:
+      artifact: recogniselayer.zip
+  Dotenv:
+    package:
+      artifact: dotenvlayer.zip
+
+functions:
+  driver:
+    handler: driver/index.handler
+    events:
+      - schedule:
+          rate: rate(2 minutes)
+    layers:
+      - Ref: DotenvLambdaLayer
+    package:
+      patterns:
+        - driver/**
+  sample:
+    handler: sample/index.handler
+    name: ${self:provider.environment.SAMPLE_LAMBDA_NAME}
+    timeout: 15
+    layers:
+      - Ref: DotenvLambdaLayer
+    package:
+      patterns:
+        - sample/**
+  recognise:
+    handler: recognise/index.handler
+    timeout: 20
+    events:
+      - s3:
+          bucket: ${self:provider.environment.BUCKET_NAME}
+          event: s3:ObjectCreated:*
+          existing: true
+    layers:
+      - ${self:provider.environment.FFMPEG_ARN}
+      - Ref: RecogniseLambdaLayer
+    package:
+      patterns:
+        - recognise/**
+
+resources:
+  Resources:
+    SampleBucket:
+      Type: AWS::S3::Bucket
+      Properties:
+        BucketName: ${self:provider.environment.BUCKET_NAME}
+        LifecycleConfiguration:
+          Rules:
+            - Status: Enabled
+              ExpirationInDays: 1
+        PublicAccessBlockConfiguration:
+          BlockPublicAcls: true
+          BlockPublicPolicy: true
+          IgnorePublicAcls: true
+          RestrictPublicBuckets: true
+        BucketEncryption:
+          ServerSideEncryptionConfiguration:
+            - ServerSideEncryptionByDefault:
+                SSEAlgorithm: AES256
+    ReporterTable:
+      Type: AWS::DynamoDB::Table
+      Properties:
+        TableName: ${self:provider.environment.DYNAMO_TABLE_NAME}
+        BillingMode: PAY_PER_REQUEST
+        AttributeDefinitions:
+          - AttributeName: pk
+            AttributeType: S
+          - AttributeName: sk
+            AttributeType: S
+        KeySchema:
+          - AttributeName: pk
+            KeyType: HASH
+          - AttributeName: sk
+            KeyType: RANGE
